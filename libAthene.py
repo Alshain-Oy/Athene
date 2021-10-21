@@ -202,7 +202,7 @@ class Utils:
         offset[1] = offset[1]  - (centreB[1] - centreBpix[1])
         
         
-        return -max_angle, offset / resize
+        return -max_angle, offset / resize, max_corr
 
 
 
@@ -258,7 +258,7 @@ class Utils:
             angle_start = minAngle - delta/2
             angle_stop = minAngle + delta/2
      
-        return minAngle, offset / resize
+        return minAngle, offset / resize, minError
 
 
     @staticmethod
@@ -281,11 +281,11 @@ class Utils:
         
         
         if kwargs.get( "useCartesianRotationSearch", False):
-            minAngle, offset = Utils.corr_rotation( plateA, plateB, **kwargs)
+            minAngle, offset, max_corr = Utils.corr_rotation( plateA, plateB, **kwargs)
         else:
-            minAngle, offset = Utils.corr_rotation_polar( plateA, plateB, **kwargs)
+            minAngle, offset, max_corr = Utils.corr_rotation_polar( plateA, plateB, **kwargs)
         
-        return minAngle, offset
+        return minAngle, offset, max_corr
 
     @staticmethod
     def compute_total_area( all_points ):
@@ -413,8 +413,11 @@ class ShapeMatcher( object ):
 
             t_cnt = Utils.merge_contours(cnts_cnt)
 
-            angle, offset = Utils.bruteforce_contour_orientation(template["image"], data["image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
+            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["image"], data["image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
             
+            if max_corr < args.get("minimumCorrelation", 0.5):
+                continue
+
             rect_cnt = cv2.minAreaRect(np.array(t_cnt))
 
             # area
