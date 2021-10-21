@@ -201,8 +201,9 @@ class Utils:
         offset[0] = offset[0]  - (centreB[0] - centreBpix[0])
         offset[1] = offset[1]  - (centreB[1] - centreBpix[1])
         
+        offset = np.array( offset )
         
-        return -max_angle, offset / resize, max_corr
+        return -max_angle, (offset / resize), max_corr
 
 
 
@@ -258,7 +259,7 @@ class Utils:
             angle_start = minAngle - delta/2
             angle_stop = minAngle + delta/2
      
-        return minAngle, offset / resize, minError
+        return minAngle, (offset / resize), minError
 
 
     @staticmethod
