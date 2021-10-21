@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 
-
-import sys
 import math
-import time
-
 import cv2
-
-import ctypes
 import numpy as np
 import mahotas
-from numpy.lib import utils
-
 
 from sklearn.cluster import DBSCAN
 
