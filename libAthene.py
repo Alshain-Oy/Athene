@@ -63,7 +63,10 @@ class Utils:
             edges = bw
 
         if kwargs.get("useAdaptiveTh", False):
-            edges = cv2.adaptiveThreshold( bw, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, kwargs.get("adaptiveTileSize", 51), kwargs.get("adaptiveC", 6) )
+            mode = cv2.THRESH_BINARY_INV
+            if kwargs.get("invertAdaptive", False):
+                mode = cv2.THRESH_BINARY
+            edges = cv2.adaptiveThreshold( bw, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, mode, kwargs.get("adaptiveTileSize", 51), kwargs.get("adaptiveC", 6) )
         
         D = math.sqrt( edges.shape[0]**2 + edges.shape[1]**2)
         padding = int( (D - min(edges.shape)) / 2 + 1 )
@@ -78,7 +81,8 @@ class Utils:
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
             edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
-        cnts, _ = cv2.findContours(edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        #cnts, _ = cv2.findContours(edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        cnts, _ = cv2.findContours(edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
 
         output = []
 
@@ -132,7 +136,7 @@ class Utils:
 
 
     @staticmethod
-    def corr_rotation_polar( plateA, plateB, **kwargs ):
+    def corr_rotation_polar( plateA, plateB, plateBoriginalSize, **kwargs ):
         
         resize = kwargs.get( "rotationSearchResize", 1)
         minSize = kwargs.get( "minimumRotationImageSize", 36 )
@@ -198,11 +202,38 @@ class Utils:
                     offset = np.array((-dx, -dy))
 
 
+        
+        if kwargs.get("secondaryCorrelationTest", True):
+            M = cv2.getRotationMatrix2D( centreB, -max_angle, 1 )
+            plateB_rot = cv2.warpAffine( plateB, M, (plateB.shape[1], plateB.shape[0]) )
+            
+            template = plateA.copy()
+            
+            if plateB_rot.shape[0] > plateA.shape[0] and plateB_rot.shape[1] > plateA.shape[1]:
+
+                if plateBoriginalSize[0]*resize + 2*abs(offset[1]) < plateA.shape[0]:
+                    if plateBoriginalSize[1]*resize + 2*abs(offset[0]) < plateA.shape[1]:
+                        acx = plateA.shape[1] / 2 - offset[0]
+                        acy = plateA.shape[0] / 2 - offset[1]
+                        x0 = int( acx - (plateBoriginalSize[1]*resize-2) / 2)
+                        x1 = int( acx + (plateBoriginalSize[1]*resize-2) / 2)
+                        
+                        y0 = int( acy - (plateBoriginalSize[0]*resize-2) / 2)
+                        y1 = int( acy + (plateBoriginalSize[0]*resize-2) / 2)
+                        template = template[y0:y1, x0:x1]
+
+                res = cv2.matchTemplate(plateB_rot, template, cv2.TM_CCORR_NORMED )
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                max_corr = max( max_val, max_corr)
+            
+
+            
         offset[0] = offset[0]  - (centreB[0] - centreBpix[0])
         offset[1] = offset[1]  - (centreB[1] - centreBpix[1])
         
         offset = np.array( offset )
         
+
         return -max_angle, (offset / resize), max_corr
 
 
@@ -271,20 +302,20 @@ class Utils:
         x,y,w,h = cv2.boundingRect(cntB_all)
         border = 15
         plateB = cv2.copyMakeBorder(imageContour, 15, 15, 15, 15, cv2.BORDER_CONSTANT, 0)[y-border+15:y+h+border+15, x-border+15:x+w+border+15]
-        
+        plateBoriginalSize = plateB.shape
 
         H = max([plateA.shape[0], plateB.shape[0]])
         W = max([plateA.shape[1], plateB.shape[1]])
 
         
-        padding = max([W, H])
+        padding = max([W, H])//2
         plateB = cv2.copyMakeBorder( plateB, padding, padding, padding, padding, cv2.BORDER_CONSTANT, 0)
         
         
         if kwargs.get( "useCartesianRotationSearch", False):
             minAngle, offset, max_corr = Utils.corr_rotation( plateA, plateB, **kwargs)
         else:
-            minAngle, offset, max_corr = Utils.corr_rotation_polar( plateA, plateB, **kwargs)
+            minAngle, offset, max_corr = Utils.corr_rotation_polar( plateA, plateB, plateBoriginalSize, **kwargs)
         
         return minAngle, offset, max_corr
 
@@ -301,13 +332,13 @@ class ShapeMatcher( object ):
         self.parameters = {}
         self.parameters.update( kwargs )
 
-        self._clustering = DBSCAN( eps = self.parameters.get("cluster_eps", 20), min_samples = 3 )
+        self._clustering = DBSCAN( eps = self.parameters.get("clusteringDistance", 20), min_samples = 3 )
 
     def configure( self, **kwargs ):
         self.parameters.update( kwargs )
 
-        if "cluster_eps" in kwargs:
-            self._clustering = DBSCAN( eps = kwargs.get( "cluster_eps" ), min_samples = 3 )
+        if "clusteringDistance" in kwargs:
+            self._clustering = DBSCAN( eps = kwargs.get( "clusteringDistance" ), min_samples = 3 )
 
 
     def add_template( self, name, image, **kwargs ):
@@ -340,8 +371,8 @@ class ShapeMatcher( object ):
         results = np.zeros( (len(template["ZM"]), len(data["ZM"]) ) )
 
 
-        min_rel_size = 1 - args.get("size_range", 0.2)
-        max_rel_size = 1 + args.get("size_range", 0.2)
+        min_rel_size = 1 - args.get("sizeRange", 0.2)
+        max_rel_size = 1 + args.get("sizeRange", 0.2)
         
         found_patterns = []
         matching_cnts = {}
@@ -365,6 +396,9 @@ class ShapeMatcher( object ):
 
         if args.get("drawResults", True):
             outimg = image.copy()
+        
+        if args.get( "stepByStep", False):
+            outimg_sbs = image.copy()
 
 
         threshold = args.get( "threshold", 0.65 )
@@ -391,36 +425,34 @@ class ShapeMatcher( object ):
         cres = self._clustering.fit( points )
         labels = cres.labels_
         labels_unique = np.unique( labels )
-        n_clusters = len( labels_unique )
-
         
-        s = [None] * n_clusters
-        for i in range( n_clusters ):
-            d, = np.where(labels == i )
-            s[i] = np.int0( np.unique(indices[d]) )
+        for clusterIdx in labels_unique:
+            d, = np.where(labels == clusterIdx )
+            cluster = np.int0( np.unique(indices[d]) )
 
-            if len(s[i]) < args.get("minClusterSize", 2):
+            if len(cluster) < args.get("minClusterSize", 2):
                 continue 
                 
             
-            scores = -data["size"][ s[i] ]
-            s[i] = s[i][ np.int0( np.argsort(scores) ) ]
+            scores = -data["size"][ cluster ]
+            cluster = cluster[ np.int0( np.argsort(scores) ) ]
 
             cnts_cnt = []
 
-            for cint in s[i]:
+            for cint in cluster:
                 cntB = data["contours"][ cint ]
                 cnts_cnt.append( cntB )
 
-            t_cnt = Utils.merge_contours(cnts_cnt)
-
-            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["image"], data["image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
+                if args.get( "stepByStep", False):
+                    cv2.drawContours( outimg_sbs, np.int0([cntB * scaleFactor]), 0, (255,255,255), 3)
+                    cv2.drawContours( outimg_sbs, np.int0([cntB * scaleFactor]), 0, (0,0,0), 1)
+                
             
-            if max_corr < args.get("minimumCorrelation", 0.5):
-                continue
 
+
+            t_cnt = Utils.merge_contours(cnts_cnt)
             rect_cnt = cv2.minAreaRect(np.array(t_cnt))
-
+            
             # area
             cnt_area = rect_cnt[1][0] * rect_cnt[1][1]
             relative_area = cnt_area / template["area"]
@@ -428,6 +460,36 @@ class ShapeMatcher( object ):
             
             if relative_area < args.get("minimumSpan", 0.15):
                 continue
+            
+            
+
+            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["image"], data["image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
+            
+            
+            if args.get( "stepByStep", False):
+                tmp_img = outimg_sbs.copy()
+                outh, outw = outimg_sbs.shape[:2]
+                
+                box = cv2.boxPoints(rect_cnt)
+                box = np.int0(box*scaleFactor)
+                cv2.drawContours(tmp_img,[box],0,(0,0,255),2)
+                
+                text_colour = (0,0,255)
+                cv2.putText( tmp_img, "Correlation: %.2f" % max_corr, (outw - 230, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
+                cv2.putText( tmp_img, "Correlation: %.2f" % max_corr, (outw - 230, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
+                cv2.putText( tmp_img, "Cluster idx: %i" % clusterIdx, (outw - 230, outh - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
+                cv2.putText( tmp_img, "Cluster idx: %i" % clusterIdx, (outw - 230, outh - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
+                
+                cv2.imshow( "Step-by-Step", tmp_img)
+                cv2.waitKey(-1)
+
+
+            if max_corr < args.get("minimumCorrelation", 0.5):
+                continue
+
+            
+
+
 
             
             rect_bbox = cv2.boundingRect( np.float32(t_cnt * scaleFactor) )
@@ -474,7 +536,7 @@ class ShapeMatcher( object ):
                 arrow = np.int0(arrow)
                 outimg = cv2.drawContours(outimg,[arrow],0,(255,0,0),2)
             
-            pattern = {"angle": -angle, "position": (match_x, match_y) }
+            pattern = {"angle": -angle, "position": (match_x, match_y), "score": {"correlation": max_corr, "span": relative_area, "clusterSize": len(cluster)} }
             found_patterns.append( pattern )
     
         if args.get( "drawResults", True):
