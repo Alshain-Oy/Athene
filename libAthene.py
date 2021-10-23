@@ -55,7 +55,7 @@ class Utils:
             bw = clahe.apply( bw )
         
         # Global histogram equalization, helps to migitate variable illumination between images
-        if kwargs.get( "histEq", False):
+        if kwargs.get( "useHistEq", False):
             bw = cv2.equalizeHist(bw)
 
         # Bilateral filter reduces noise without blurring edges
