@@ -4,8 +4,11 @@ import math
 import cv2
 import numpy as np
 import mahotas
+import time
+from sklearn.base import MultiOutputMixin
 
 from sklearn.cluster import DBSCAN
+
 
 class Utils:
 
@@ -81,14 +84,13 @@ class Utils:
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
             edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
-        #cnts, _ = cv2.findContours(edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         cnts, _ = cv2.findContours(edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
-
+      
         output = []
 
         for cnt in cnts:
             area = cv2.contourArea( cnt )
-            if area < kwargs.get("contourMinSize", 25):
+            if area < kwargs.get("contourMinArea", 25):
                 continue
             
             if cnt.shape[0] < kwargs.get("contourMinLength", 5):
@@ -106,7 +108,7 @@ class Utils:
         centres = {}
 
         for i in range( len(contours) ):
-            
+            t0_total = time.time()
             cnt = contours[i]
             (cx,cy),radius = cv2.minEnclosingCircle(cnt)
             centres[i] = (cx,cy)
@@ -121,7 +123,11 @@ class Utils:
             
             plate = plate[ y-10 : y+h+10, x-10 : x+w+10 ]
 
-            out[i] = mahotas.features.zernike_moments( plate, int(radius), degree=10 )
+            t0 = time.time()
+            out[i] = mahotas.features.zernike_moments( plate, int(radius), degree=8 )
+            t1 = time.time()
+            #print( "mahotas took: %.2f ms, radius = %.1f, µs/pix = %.2f "%((t1-t0)*1000, radius, (t1-t0)*1e6/(radius*radius)))
+
             ws = np.zeros(out[i].shape)
 
             # Weights for Zernike moments to red
@@ -131,6 +137,8 @@ class Utils:
             out[i] = out[i] * ws
 
             sizes[i] = radius
+            t1_total = time.time()
+            print( "Total zernike time: %.1f ms, moments: %.1f ms, all rest: %.1f ms"%(  (t1_total-t0_total)*1000, (t1-t0)*1000, (t1_total-t0_total - (t1-t0))*1000 ) )
 
         return {"ZM": out, "size": np.array( sizes ), "centres": centres}
 
@@ -152,10 +160,6 @@ class Utils:
         plateA = cv2.resize(plateA, (0,0), fx = resize, fy = resize)
         plateB = cv2.resize(plateB, (0,0), fx = resize, fy = resize)
 
-
-
-        
-        
         plateA = cv2.copyMakeBorder(plateA, 25, 25, 25, 25, cv2.BORDER_CONSTANT, 0 )
 
         rows, cols = plateB.shape
@@ -179,29 +183,34 @@ class Utils:
         radius = min([radiusA, radiusB])
         polarA = cv2.warpPolar( plateA, (0,0), centreA, radius, cv2.WARP_FILL_OUTLIERS )
         polarSearch = np.vstack([polarA, polarA])
-        polarSearch = cv2.copyMakeBorder(polarSearch, 0, 0, 0, 15, cv2.BORDER_CONSTANT, 0)
+        polarSearch = cv2.copyMakeBorder(polarSearch, 0, 0, 0, 2, cv2.BORDER_CONSTANT, 0)
 
         
         max_corr = 0
         max_angle = 0
         offset = [0, 0]
 
+        best_polarB = None
         for dx in range( -searchRange, searchRange + 1, searchStep):
             for dy in range( -searchRange, searchRange + 1, searchStep):
 
                 polarB = cv2.warpPolar( plateB, (0,0), centreB + np.array([dx, dy]), radius - 1, cv2.WARP_FILL_OUTLIERS )
                 
-                res = cv2.matchTemplate(polarSearch, polarB, cv2.TM_CCOEFF_NORMED )
+                res = cv2.matchTemplate(polarSearch, polarB, cv2.TM_CCOEFF )
+                
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-                angle = max_loc[1]/polarSearch.shape[0] * 720
+                angle = max_loc[1] / polarSearch.shape[0] * 720
 
                 
                 if max_val > max_corr:
                     max_corr = max_val
                     max_angle = angle
                     offset = np.array((-dx, -dy))
+                    best_polarB = polarB.copy()
 
-
+        res = cv2.matchTemplate(polarSearch, best_polarB, cv2.TM_CCOEFF_NORMED )
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        max_corr = max_val        
         
         if kwargs.get("secondaryCorrelationTest", True):
             M = cv2.getRotationMatrix2D( centreB, -max_angle, 1 )
@@ -311,18 +320,137 @@ class Utils:
         padding = max([W, H])//2
         plateB = cv2.copyMakeBorder( plateB, padding, padding, padding, padding, cv2.BORDER_CONSTANT, 0)
         
-        
+        t0 = time.time()
         if kwargs.get( "useCartesianRotationSearch", False):
             minAngle, offset, max_corr = Utils.corr_rotation( plateA, plateB, **kwargs)
         else:
             minAngle, offset, max_corr = Utils.corr_rotation_polar( plateA, plateB, plateBoriginalSize, **kwargs)
-        
+        t1 = time.time()
+        print( "corr_rotation_polar took: %.1f ms"%((t1-t0)*1000))
         return minAngle, offset, max_corr
 
     @staticmethod
     def compute_total_area( all_points ):
         rect = cv2.minAreaRect( all_points )
         return rect[1][0] * rect[1][1]
+
+
+    @staticmethod
+    def draw_found_pattern( outimg, template, scaleFactor, match ):
+        match_x, match_y = match["position"]
+        angle = match["angle"]
+
+        cv2.line( outimg, np.int0((match_x, match_y-10)), np.int0((match_x, match_y+10)), (255,0,0), 1)
+        cv2.line( outimg, np.int0((match_x-10, match_y)), np.int0((match_x+10, match_y)), (255,0,0), 1)
+        
+        dx = math.cos( angle * math.pi/180 )
+        dy = math.sin( angle * math.pi/180 )
+        
+        nx = -dy
+        ny = dx
+        
+        w = template["image"].shape[1] * scaleFactor / 2
+        h = template["image"].shape[0] * scaleFactor / 2
+
+        box = []
+        box.append( [  match_x + w*dx + h * nx, match_y + w*dy + h * ny  ] )
+        box.append( [  match_x + w*dx - h * nx, match_y + w*dy - h * ny  ] )
+        box.append( [  match_x - w*dx - h * nx, match_y - w*dy - h * ny  ] )
+        box.append( [  match_x - w*dx + h * nx, match_y - w*dy + h * ny  ] )
+
+
+        box = np.int0(box)
+        outimg = cv2.drawContours(outimg,[box],0,(0,0,255),2)
+
+
+        arrow_len = 40
+        arrow_tip_size = 5
+        arrow = []
+
+        arrow.append([  match_x, match_y ])
+        arrow.append([  match_x + arrow_len*dx, match_y + arrow_len*dy ])
+
+        arrow.append([  match_x + (arrow_len - arrow_tip_size)*dx + arrow_tip_size*nx, match_y + (arrow_len - arrow_tip_size)*dy + arrow_tip_size*ny ])
+        arrow.append([  match_x + (arrow_len - arrow_tip_size)*dx - arrow_tip_size*nx, match_y + (arrow_len - arrow_tip_size)*dy - arrow_tip_size*ny ])
+        arrow.append([  match_x + arrow_len*dx, match_y + arrow_len*dy ])
+
+        arrow = np.int0(arrow)
+        outimg = cv2.drawContours(outimg,[arrow],0,(255,0,0),2)
+
+        return outimg
+
+    
+    @staticmethod
+    def detect_pattern( template, data, cluster, clusterIdx, scaleFactor, tmp_images, args ):
+        scores = -data["size"][ cluster ]
+        cluster = cluster[ np.int0( np.argsort(scores) ) ]
+
+        cnts_cnt = []
+
+        for cint in cluster:
+            cntB = data["contours"][ cint ]
+            cnts_cnt.append( cntB )
+
+            if args.get( "stepByStep", False):
+                cv2.drawContours( tmp_images["outimg_sbs"], np.int0([cntB * scaleFactor]), 0, (255,255,255), 3)
+                cv2.drawContours( tmp_images["outimg_sbs"], np.int0([cntB * scaleFactor]), 0, (0,0,0), 1)
+            
+        
+
+
+        t_cnt = Utils.merge_contours(cnts_cnt)
+        rect_cnt = cv2.minAreaRect(np.array(t_cnt))
+        
+        # area
+        cnt_area = rect_cnt[1][0] * rect_cnt[1][1]
+        relative_area = cnt_area / template["area"]
+
+        
+        if relative_area < args.get("minimumSpan", 0.15):
+            return None
+        
+        if args.get("useEdgesForOrientation", False):
+            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["edges"], data["edges"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
+        
+        elif args.get("useContoursForOrientation", False):
+            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["drawn_contours"], tmp_images["drawn_contours_image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
+        
+        else:
+            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["image"], data["image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
+        
+        
+        if args.get( "stepByStep", False):
+            tmp_img = tmp_images["outimg_sbs"].copy()
+            outh, outw = tmp_images["outimg_sbs"].shape[:2]
+            
+            box = cv2.boxPoints(rect_cnt)
+            box = np.int0(box*scaleFactor)
+            cv2.drawContours(tmp_img,[box],0,(0,0,255),2)
+            
+            text_colour = (0,0,255)
+            cv2.putText( tmp_img, "Correlation: %.2f" % max_corr, (outw - 230, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
+            cv2.putText( tmp_img, "Correlation: %.2f" % max_corr, (outw - 230, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
+            cv2.putText( tmp_img, "Cluster idx: %i" % clusterIdx, (outw - 230, outh - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
+            cv2.putText( tmp_img, "Cluster idx: %i" % clusterIdx, (outw - 230, outh - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
+            
+            cv2.imshow( "Step-by-Step", tmp_img)
+            cv2.waitKey(-1)
+
+
+        if max_corr < args.get("minimumCorrelation", 0.5):
+            return None
+        
+        rect_bbox = cv2.boundingRect( np.float32(t_cnt * scaleFactor) )
+
+        match_x = -offset[1] * scaleFactor + rect_bbox[0] + rect_bbox[2] / 2
+        match_y = -offset[0] * scaleFactor + rect_bbox[1] + rect_bbox[3] / 2
+        
+        pattern = {"angle": angle, "position": (match_x, match_y), "score": {"correlation": max_corr, "span": relative_area, "clusterSize": len(cluster)} }
+        return pattern
+
+    @staticmethod
+    def detect_pattern_mp( args ):
+        return Utils.detect_pattern( *args )
 
 
 class ShapeMatcher( object ):
@@ -334,12 +462,21 @@ class ShapeMatcher( object ):
 
         self._clustering = DBSCAN( eps = self.parameters.get("clusteringDistance", 20), min_samples = 3 )
 
+
+        self._timings = []
+        self._t0 = 0
+
     def configure( self, **kwargs ):
         self.parameters.update( kwargs )
 
         if "clusteringDistance" in kwargs:
             self._clustering = DBSCAN( eps = kwargs.get( "clusteringDistance" ), min_samples = 3 )
 
+    def _start_clock( self ):
+        self._t0 = time.time()
+    
+    def _stop_clock( self, name ):
+        self._timings.append( (name, (time.time() - self._t0)*1000 ) ) 
 
     def add_template( self, name, image, **kwargs ):
         args = {}
@@ -354,15 +491,35 @@ class ShapeMatcher( object ):
         
         self.templates[ name ][ "area" ] = Utils.compute_total_area( self.templates[ name ][ "all points" ] ) 
     
+    def get_template_specs( self, name ):
+        out = {}
+        out["name"] = name
+        out["area"] = self.templates[name]["area"]
+        out["Ncontours"] = len( self.templates[name]["contours"] )
+        out["contours"] = []
+        for cnt in self.templates[name]["contours"]:
+            entry = {}
+            entry["length"] = cnt.shape[0]
+            entry["area"] = cv2.contourArea( cnt )
+            out["contours"].append( entry )
+        return out
+
+
 
     def detect( self, template_name, image, **kwargs ):
         args = {}
         args.update( self.parameters )
         args.update( kwargs )
 
+        self._start_clock()
         data = Utils.preprocess_image( image, **args )
+        self._stop_clock("preprocess")
+
+        self._start_clock()
         fingerprints = Utils.compute_zernike_moments( data["edges"], data[ "contours" ] )
         data.update( fingerprints )
+        self._stop_clock("fingerprinting")
+        print( "len(data[contours]) =",len(data["contours"]) )
 
         scaleFactor = 1.0 / args.get("imageScale", 1.0)
 
@@ -376,6 +533,8 @@ class ShapeMatcher( object ):
         
         found_patterns = []
         matching_cnts = {}
+        
+        self._start_clock()
 
         for i in template["ZM"].keys():
             for j in data["ZM"].keys():
@@ -393,32 +552,59 @@ class ShapeMatcher( object ):
                     matching_cnts[j] = (i, results[i][j])
         
         mins = np.min(results, axis = 0)
-
-        if args.get("drawResults", True):
-            outimg = image.copy()
         
-        if args.get( "stepByStep", False):
-            outimg_sbs = image.copy()
-
-
         threshold = args.get( "threshold", 0.65 )
         
         selected_cnts = np.where( mins < threshold )[0]
         
+        self._stop_clock("contour matching")
+
+        temporary_images = {}
+        if args.get("drawResults", True):
+            outimg = image.copy()
+        
+        if args.get( "stepByStep", False):
+            temporary_images["outimg_sbs"] = image.copy()
+        
+
+        
         points = None
         indices = np.array([], dtype=np.int64)
         
+        self._start_clock()
+        
+        if args.get("useContoursForOrientation", False):
+            temporary_images["drawn_contours_image"] = np.zeros( data["edges"].shape, dtype=np.uint8 )
+            for i in selected_cnts:
+                cnt = data["contours"][i]
+                cv2.drawContours(temporary_images["drawn_contours_image"], [cnt], -1, 255, 2)
+            
+            if "drawn_contours" not in template:
+                template["drawn_contours"] = np.zeros( template["edges"].shape, dtype=np.uint8 )
+                cv2.drawContours(template["drawn_contours"], template["contours"], -1, 255, 2)
+
+
+        self._stop_clock("temporary images")
+
+        self._start_clock()
+
         for i in selected_cnts:
             cnt = data["contours"][i]
             if args.get("drawResults", True):
                 outimg = cv2.drawContours( outimg, [np.int0(cnt * scaleFactor)], -1, (0,255,0), 1 )
           
+
+            stipple_cnt = cnt[::args.get("countourStippleFactor", 4)]
             if points is None:
-                points = cnt.copy()
+                points = stipple_cnt.copy()
             else:
-                points = np.append( points, cnt, axis = 0)
+                points = np.append( points, stipple_cnt, axis = 0)
             
-            indices = np.append( indices, np.ones( (len(cnt),) )*i, axis = 0)
+            indices = np.append( indices, np.ones( (len(stipple_cnt),) )*i, axis = 0)
+
+        self._stop_clock("clustering (preops)")
+
+        self._start_clock()
 
         points = np.reshape( points, (-1,2) )
         
@@ -426,121 +612,35 @@ class ShapeMatcher( object ):
         labels = cres.labels_
         labels_unique = np.unique( labels )
         
+        candidate_clusters = []
+
         for clusterIdx in labels_unique:
             d, = np.where(labels == clusterIdx )
             cluster = np.int0( np.unique(indices[d]) )
 
             if len(cluster) < args.get("minClusterSize", 2):
                 continue 
-                
             
-            scores = -data["size"][ cluster ]
-            cluster = cluster[ np.int0( np.argsort(scores) ) ]
+            candidate_clusters.append( (clusterIdx, cluster))
+        
+        self._stop_clock("clustering (rest)")
 
-            cnts_cnt = []
-
-            for cint in cluster:
-                cntB = data["contours"][ cint ]
-                cnts_cnt.append( cntB )
-
-                if args.get( "stepByStep", False):
-                    cv2.drawContours( outimg_sbs, np.int0([cntB * scaleFactor]), 0, (255,255,255), 3)
-                    cv2.drawContours( outimg_sbs, np.int0([cntB * scaleFactor]), 0, (0,0,0), 1)
-                
-            
+        
+        for (clusterIdx, cluster) in candidate_clusters:
+            self._start_clock()
+            pattern = Utils.detect_pattern( template, data, cluster, clusterIdx, scaleFactor, temporary_images, args )
+            if pattern is not None:
+                found_patterns.append( pattern )
+            self._stop_clock("per-pattern-%s" % clusterIdx )
 
 
-            t_cnt = Utils.merge_contours(cnts_cnt)
-            rect_cnt = cv2.minAreaRect(np.array(t_cnt))
-            
-            # area
-            cnt_area = rect_cnt[1][0] * rect_cnt[1][1]
-            relative_area = cnt_area / template["area"]
-
-            
-            if relative_area < args.get("minimumSpan", 0.15):
-                continue
-            
-            
-
-            angle, offset, max_corr = Utils.bruteforce_contour_orientation(template["image"], data["image"], template["contours"], cnts_cnt, template["all points"], t_cnt, **args )
-            
-            
-            if args.get( "stepByStep", False):
-                tmp_img = outimg_sbs.copy()
-                outh, outw = outimg_sbs.shape[:2]
-                
-                box = cv2.boxPoints(rect_cnt)
-                box = np.int0(box*scaleFactor)
-                cv2.drawContours(tmp_img,[box],0,(0,0,255),2)
-                
-                text_colour = (0,0,255)
-                cv2.putText( tmp_img, "Correlation: %.2f" % max_corr, (outw - 230, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
-                cv2.putText( tmp_img, "Correlation: %.2f" % max_corr, (outw - 230, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
-                cv2.putText( tmp_img, "Cluster idx: %i" % clusterIdx, (outw - 230, outh - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
-                cv2.putText( tmp_img, "Cluster idx: %i" % clusterIdx, (outw - 230, outh - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
-                
-                cv2.imshow( "Step-by-Step", tmp_img)
-                cv2.waitKey(-1)
-
-
-            if max_corr < args.get("minimumCorrelation", 0.5):
-                continue
-
-            
-
-
-
-            
-            rect_bbox = cv2.boundingRect( np.float32(t_cnt * scaleFactor) )
-
-            match_x = -offset[1] * scaleFactor + rect_bbox[0] + rect_bbox[2] / 2
-            match_y = -offset[0] * scaleFactor + rect_bbox[1] + rect_bbox[3] / 2
-
-            if args.get("drawResults", True):
-                
-                cv2.line( outimg, np.int0((match_x, match_y-10)), np.int0((match_x, match_y+10)), (255,0,0), 1)
-                cv2.line( outimg, np.int0((match_x-10, match_y)), np.int0((match_x+10, match_y)), (255,0,0), 1)
-                
-                dx = math.cos( angle * math.pi/180 )
-                dy = math.sin( angle * math.pi/180 )
-                
-                nx = -dy
-                ny = dx
-                
-                w = template["image"].shape[1] * scaleFactor / 2
-                h = template["image"].shape[0] * scaleFactor / 2
-
-                box = []
-                box.append( [  match_x + w*dx + h * nx, match_y + w*dy + h * ny  ] )
-                box.append( [  match_x + w*dx - h * nx, match_y + w*dy - h * ny  ] )
-                box.append( [  match_x - w*dx - h * nx, match_y - w*dy - h * ny  ] )
-                box.append( [  match_x - w*dx + h * nx, match_y - w*dy + h * ny  ] )
-
-
-                box = np.int0(box)
-                outimg = cv2.drawContours(outimg,[box],0,(0,0,255),2)
-
-
-                arrow_len = 40
-                arrow_tip_size = 5
-                arrow = []
-
-                arrow.append([  match_x, match_y ])
-                arrow.append([  match_x + arrow_len*dx, match_y + arrow_len*dy ])
-
-                arrow.append([  match_x + (arrow_len - arrow_tip_size)*dx + arrow_tip_size*nx, match_y + (arrow_len - arrow_tip_size)*dy + arrow_tip_size*ny ])
-                arrow.append([  match_x + (arrow_len - arrow_tip_size)*dx - arrow_tip_size*nx, match_y + (arrow_len - arrow_tip_size)*dy - arrow_tip_size*ny ])
-                arrow.append([  match_x + arrow_len*dx, match_y + arrow_len*dy ])
-
-                arrow = np.int0(arrow)
-                outimg = cv2.drawContours(outimg,[arrow],0,(255,0,0),2)
-            
-            pattern = {"angle": -angle, "position": (match_x, match_y), "score": {"correlation": max_corr, "span": relative_area, "clusterSize": len(cluster)} }
-            found_patterns.append( pattern )
-    
         if args.get( "drawResults", True):
+            self._start_clock()
+            for pattern in found_patterns:
+                outimg = Utils.draw_found_pattern( outimg, template, scaleFactor, pattern )
+            self._stop_clock("drawing results")          
             return found_patterns, outimg
+
         else:
             return found_patterns
 
