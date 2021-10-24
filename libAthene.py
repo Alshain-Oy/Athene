@@ -162,23 +162,40 @@ class Utils:
             plate = plate[ y - border + padding : y + h + padding + border, x - border + padding : x + w + padding + border ]
             
             # Cap the maximum size of the image to be analysed (otherwise takes too long)
-            maxRadius = kwargs.get("maxZernikeRadius", 16)
+            maxRadius = kwargs.get("maxFingerprintingRadius", 16)
             if radius > maxRadius:
                 L = maxRadius*2
                 plate = cv2.resize( plate, (L, L))
                 radius = maxRadius
 
-            # Compute Zernike moments
-            out[i] = mahotas.features.zernike_moments( plate, int(radius), degree=8 )
-           
-            ws = np.zeros(out[i].shape)
+            # Select if Zernike or Hu moments will be used for fingerprinting
+            if kwargs.get("useHuMoments", False):
+               
+                # Compute Hu moments using the same rendered image than Zernike
+                M = cv2.moments( plate, binaryImage=True )
+                H = cv2.HuMoments(M)
 
-            # Weights for Zernike moments to reduce noise from higher order moments
-            for n in range( len( ws ) ):
-                ws[n] = math.pow(1.1, -n)
+                # perserve signs
+                signs = np.where(H < 0)
+
+                # Because Hu moments are very small, take a base-10 logarithm and apply some scaling (to be in the same range than Zernike moments)
+                H = np.log10( np.abs( H ) + 1e-20 ) / 64.0
+                
+                H[signs] *= -1
+                out[i] = H
+
+            else:
+                # Compute Zernike moments
+                out[i] = mahotas.features.zernike_moments( plate, int(radius), degree=kwargs.get("zernikeOrder", 8) )
             
-            # Apply weights
-            out[i] = out[i] * ws
+                ws = np.zeros(out[i].shape)
+
+                # Weights for Zernike moments to reduce noise from higher order moments
+                for n in range( len( ws ) ):
+                    ws[n] = math.pow(1.1, -n)
+                
+                # Apply weights
+                out[i] = out[i] * ws
 
             # Diameter of the contour
             sizes[i] = 2*radius
@@ -543,6 +560,22 @@ class Utils:
         pattern = {"angle": angle, "position": (match_x, match_y), "score": {"correlation": max_corr, "span": relative_area, "clusterSize": len(cluster)} }
         return pattern
 
+    @staticmethod
+    def compute_contour_limits_from_specs( specs, margin = 0.15 ):
+        areas = []
+        lengths = []
+        for cnt in specs["contours"]:
+            areas.append( cnt["area"] )
+            lengths.append( cnt["length"] )
+        
+        out = {}
+        out["minContourArea"] = (1 - margin) * min( areas )
+        out["maxContourArea"] = (1 + margin) * max( areas )
+        out["minContourLength"] = (1 - margin) * min( lengths )
+        out["maxContourLength"] = (1 + margin) * max( lengths )
+        return out
+        
+
 
 # ShapeMatcher class combines all operations into a single class
 class ShapeMatcher( object ):
@@ -573,6 +606,8 @@ class ShapeMatcher( object ):
     def _stop_clock( self, name ):
         self._timings.append( (name, (time.time() - self._t0)*1000 ) ) 
 
+    def _clear_clock_log( self ):
+        self._timings = []
 
     # Add and process template for pattern matching
     def add_template( self, name, image, **kwargs ):
@@ -611,6 +646,9 @@ class ShapeMatcher( object ):
         args = {}
         args.update( self.parameters )
         args.update( kwargs )
+
+        # Clear timing log so that it doesn't grow unbounded
+        self._clear_clock_log()
 
 
         # Preprocess image and find all contours
