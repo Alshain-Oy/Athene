@@ -29,12 +29,22 @@ class Utils:
             out = np.append(out, cnt, axis = 0)        
         return out
 
+    # Estimate contour area
+    @staticmethod
+    def compute_total_area( all_points ):
+        rect = cv2.minAreaRect( all_points )
+        return rect[1][0] * rect[1][1]
+
 
     # Preprocess image (thresholding, edge detection, contour search)     
     @staticmethod
     def preprocess_image( img, **kwargs ):
-
-        img_bw = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Check if image in in colour or grayscale
+        if len(img.shape) < 3:
+            img_bw = img.copy()
+        else:
+            img_bw = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
         # Enhance image with unsharp masking (makes edges more prominent)
         if kwargs.get( "useUnsharpMask", False):
@@ -109,7 +119,8 @@ class Utils:
 
         # Filter out too small and too large contours
         for cnt in cnts:
-            area = cv2.contourArea( cnt )
+            #area = cv2.contourArea( cnt )
+            area = Utils.compute_total_area( cnt )
 
             # Estimated area of the contour
             if area < kwargs.get("contourMinArea", 25):
@@ -423,11 +434,6 @@ class Utils:
         
         return minAngle, offset, max_corr
 
-    # Estimate contour area
-    @staticmethod
-    def compute_total_area( all_points ):
-        rect = cv2.minAreaRect( all_points )
-        return rect[1][0] * rect[1][1]
 
 
     # Draws results and orientation arrows
@@ -569,10 +575,10 @@ class Utils:
             lengths.append( cnt["length"] )
         
         out = {}
-        out["minContourArea"] = (1 - margin) * min( areas )
-        out["maxContourArea"] = (1 + margin) * max( areas )
-        out["minContourLength"] = (1 - margin) * min( lengths )
-        out["maxContourLength"] = (1 + margin) * max( lengths )
+        out["contourMinArea"] = (1 - margin) * min( areas )
+        out["contourMaxArea"] = (1 + margin) * max( areas )
+        out["contourMinLength"] = (1 - margin) * min( lengths )
+        out["contourMaxLength"] = (1 + margin) * max( lengths )
         return out
         
 
@@ -636,7 +642,7 @@ class ShapeMatcher( object ):
         for cnt in self.templates[name]["contours"]:
             entry = {}
             entry["length"] = cnt.shape[0]
-            entry["area"] = cv2.contourArea( cnt )
+            entry["area"] = Utils.compute_total_area( cnt )
             out["contours"].append( entry )
         return out
 
@@ -766,6 +772,11 @@ class ShapeMatcher( object ):
 
         self._start_clock()
 
+        # Test if any suitable contours were found
+        if points is None or len(points) < 3:
+            return [], outimg
+        
+
         # Compute clusters (= which contours are close to each other and therefore probably part of the same pattern)
         points = np.reshape( points, (-1,2) )        
         cres = self._clustering.fit( points )
@@ -806,5 +817,92 @@ class ShapeMatcher( object ):
 
         else:
             return found_patterns
+
+
+# Performs pattern matching
+    def detect_circles( self, image, minRadius = 10, maxRadius = 100, **kwargs ):
+        args = {}
+        args.update( self.parameters )
+        args.update( kwargs )
+
+        # Clear timing log so that it doesn't grow unbounded
+        self._clear_clock_log()
+
+
+        # Preprocess image and find all contours
+        self._start_clock()
+        data = Utils.preprocess_image( image, **args )
+        self._stop_clock("preprocess")
+        
+        if args.get("stepByStep", False):
+            cv2.imshow("Input image", data["image"] )
+            cv2.waitKey(-1)
+            cv2.imshow("Input image", data["edges"] )
+            cv2.waitKey(-1)
+            tmpimg = cv2.cvtColor( data["edges"], cv2.COLOR_GRAY2BGR )
+            cv2.drawContours(tmpimg, data["contours"], -1, (255,0,0), 1 )
+            cv2.imshow("Input image", tmpimg)
+            cv2.waitKey(-1)
+        
+        
+
+
+        found_patterns = []
+
+        for cnt in data["contours"]:
+            (cx, cy), circle_radius = cv2.minEnclosingCircle( cnt )
+            
+            if minRadius < circle_radius < maxRadius:
+                
+                rect = cv2.minAreaRect( cnt )
+                
+                plate = np.zeros(np.int0((2*circle_radius, 2*circle_radius)), dtype=np.uint8)
+                cv2.drawContours(plate, [cnt], 0, 255, 1, offset=-np.int0((cx-circle_radius, cy-circle_radius)))
+                cv2.circle(plate, np.int0((circle_radius, circle_radius)), int(circle_radius-1), 0, 5)
+                
+                overlap_score =  np.sum(plate)/len(cnt)/255
+            
+                if args.get("stepByStep", False):
+                    tmp = tmpimg.copy()
+                    
+                    box = cv2.boxPoints( rect )
+                    box = np.int0( box )
+                    cv2.drawContours( tmp, [box], 0, (0,0,255), 1 )
+                    
+                    
+                    cv2.circle( tmp, np.int0( (cx, cy) ), int( circle_radius ), (0,0,255), 2 )
+                    
+                    #print( "Overlap score: %.2f" % overlap_score)
+                    
+                    text_colour = (0,0,255)
+                    outh, outw, _ = tmp.shape
+                    cv2.putText( tmp, "Overlap score: %.2f" % overlap_score, (outw - 250, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 5, cv2.LINE_AA )
+                    cv2.putText( tmp, "Overlap score: %.2f" % overlap_score, (outw - 250, outh - 100), cv2.FONT_HERSHEY_SIMPLEX, 0.75, text_colour, 1, cv2.LINE_AA )
+            
+
+                    cv2.imshow( "Candidates", tmp)
+                    cv2.waitKey(-1)
+
+                if overlap_score > args.get("maxOverlapScore", 0.15):
+                    continue
+                    
+
+            
+                found_patterns.append({ "angle": 0, "position": (cx, cy), "radius": circle_radius, "score":{"overlap": overlap_score} })
+        
+        if args.get("drawResults", True):
+            outimg = image.copy()
+
+            for pattern in found_patterns:
+                cv2.circle( outimg, np.int0( pattern["position"] ), int( pattern["radius"] ), (0,0,255), 2 )
+            
+            return found_patterns, outimg
+        
+        else:
+            return found_patterns
+
+
+
+
 
 
